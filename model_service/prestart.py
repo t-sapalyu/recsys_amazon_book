@@ -23,9 +23,8 @@ from sqlalchemy.dialects.postgresql import insert
 import db_utility
 from db_utility import Interaction, Item, User
 
-SAMPLE_MODE = os.getenv("SAMPLE_MODE", "true").lower() == "true"
 APP_ROOT = Path(os.getenv("APP_ROOT", "/app"))
-DATA_DIR = APP_ROOT / "data" / ("processed_sample" if SAMPLE_MODE else "processed")
+DATA_DIR = APP_ROOT / "data" / "processed"
 N_DEMO_USERS = int(os.getenv("N_DEMO_USERS", "300"))
 
 
@@ -128,23 +127,30 @@ def upsert_update_batch(session, model, rows: list, pk_cols: list, batch_size: i
 
 def migrate_schema():
     """`create_all` only creates missing *tables*, never alters existing ones
-    — an `items` table from before the `author` column was added needs an
-    explicit ALTER. Checked defensively (only runs if the column is actually
-    missing) so this stays a no-op on a fresh database or a rerun."""
+    — tables from before a column was added need an explicit ALTER. Checked
+    defensively (only runs if the column is actually missing) so this stays
+    a no-op on a fresh database or a rerun."""
     from sqlalchemy import text
     with db_utility.engine.connect() as conn:
         if db_utility.engine.dialect.name == "sqlite":
-            existing_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(items)"))}
-            if "author" not in existing_cols:
+            existing_item_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(items)"))}
+            if "author" not in existing_item_cols:
                 conn.execute(text("ALTER TABLE items ADD COLUMN author VARCHAR"))
-                conn.commit()
+            existing_user_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(users)"))}
+            if "created_at" not in existing_user_cols:
+                # Backfilled with the current timestamp (not NULL) — a NULL
+                # would sort inconsistently against real timestamps in the
+                # `ORDER BY created_at DESC` used to surface recent signups.
+                conn.execute(text("ALTER TABLE users ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP"))
+            conn.commit()
         else:
             conn.execute(text("ALTER TABLE items ADD COLUMN IF NOT EXISTS author VARCHAR"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT now()"))
             conn.commit()
 
 
 def main():
-    print(f"Seeding from {DATA_DIR} (SAMPLE_MODE={SAMPLE_MODE})")
+    print(f"Seeding from {DATA_DIR}")
 
     print("Creating tables...")
     db_utility.Base.metadata.create_all(bind=db_utility.engine, checkfirst=True)

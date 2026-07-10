@@ -1,5 +1,6 @@
 """Pydantic response models for the recommendation API."""
 
+from datetime import datetime
 from typing import List, Optional
 
 from pydantic import BaseModel
@@ -55,3 +56,106 @@ class LatencyStats(BaseModel):
     avg_ms: float
     p50_ms: float
     p95_ms: float
+
+
+# --- Categories & guest discovery ---
+
+class CategoryListResponse(BaseModel):
+    categories: List[str]
+
+
+class DiscoverResponse(BaseModel):
+    trending_source_model: str
+    trending: List[RecommendedItem]
+    discover_source_model: str
+    discover: List[RecommendedItem]
+
+
+# --- Signup / onboarding ---
+
+class SignupRequest(BaseModel):
+    user_id: str
+
+
+class CategoryPreferenceRequest(BaseModel):
+    categories: List[str]
+
+
+# --- Implicit events ---
+
+class EventRequest(BaseModel):
+    session_id: str
+    user_id: Optional[str] = None
+    parent_asin: Optional[str] = None
+    event_type: str
+    position: Optional[int] = None
+    value: Optional[float] = None
+
+
+class EventResponse(BaseModel):
+    status: str
+    derived_negative_event: Optional[str] = None
+
+
+# --- Wishlist / cart / checkout / ratings ---
+
+class WishlistActionRequest(BaseModel):
+    parent_asin: str
+    session_id: str
+
+
+class WishlistItemOut(BaseModel):
+    item: ItemOut
+    added_at: datetime
+    view_count: int
+
+
+class WishlistResponse(BaseModel):
+    items: List[WishlistItemOut]
+
+
+class CartActionRequest(BaseModel):
+    parent_asin: str
+    session_id: str
+
+
+class CartItemOut(BaseModel):
+    item: ItemOut
+    added_at: datetime
+
+
+class CartResponse(BaseModel):
+    items: List[CartItemOut]
+    total_price: float
+
+
+class CheckoutRequest(BaseModel):
+    session_id: str
+
+
+class CheckoutResponse(BaseModel):
+    status: str
+    checked_out_items: List[ItemOut]
+
+
+class RatingRequest(BaseModel):
+    parent_asin: str
+    rating: float
+    session_id: str
+
+
+# --- Activity log (viewing recorded positive/negative signals) ---
+
+class EventLogItem(BaseModel):
+    event_type: str
+    signal: str
+    reason: Optional[str] = None
+    parent_asin: Optional[str] = None
+    item_title: Optional[str] = None
+    position: Optional[int] = None
+    value: Optional[float] = None
+    created_at: datetime
+
+
+class EventLogResponse(BaseModel):
+    events: List[EventLogItem]

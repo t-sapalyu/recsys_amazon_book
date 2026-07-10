@@ -29,7 +29,6 @@ services:
       # Offline artifacts produced by the notebooks (01-05) — mounted
       # read-only since the API only ever reads them, never writes.
       - ./data:/app/data:ro
-      - ./checkpoints_sample:/app/checkpoints_sample:ro
       - ./checkpoints:/app/checkpoints:ro
     depends_on:
       db:
