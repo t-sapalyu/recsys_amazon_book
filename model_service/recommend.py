@@ -6,7 +6,7 @@ this author", and "Readers who liked this also read" (author-centroid
 similarity).
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -14,6 +14,19 @@ import pandas as pd
 
 import db_utility
 from model_loader import Artifacts
+
+# "Top row" of a recommendation carousel, for `impression_no_click` — matches
+# webapp/services/ui.py's `render_item_row` default `n_cols`. A card buried
+# lower in a big grid may never have actually been seen, so only this
+# prominent slot counts as a trustworthy "shown but ignored" signal.
+TOP_ROW_MAX_POSITION = 5
+IMPRESSION_NO_CLICK_THRESHOLD = 10
+
+# `repeated_wishlist_no_purchase` — a wishlist (unlike a cart) is meant to
+# persist, so only flag an item once it's lingered a long time across many
+# return visits without ever converting to a purchase.
+WISHLIST_NO_PURCHASE_MIN_AGE = timedelta(days=182)
+WISHLIST_NO_PURCHASE_MIN_VIEWS = 10
 
 
 def _temperature_sample(scored_items: List[Tuple[object, float]], k: int, temperature: float, rng: np.random.Generator):
@@ -324,3 +337,79 @@ def personalized_recommendations(
 
     scored = [(items_by_id[row["parent_asin"]], float(s)) for row, s in zip(rows, lgb_scores)]
     return _temperature_sample(scored, k, temperature, rng)
+
+
+def discover_for_guest(
+    db, trending_k: int = 20, random_k: int = 10, pool_size: int = 30,
+    temperature: float = 0.5, rng: np.random.Generator = None,
+):
+    """Guest homepage: trending books (same definition as
+    `popular_recommendations`) plus a handful of true-random books from
+    categories none of the trending picks belong to, so logged-out users see
+    some catalog breadth instead of the same popular corner every reload.
+    Both halves already vary per request (temperature sampling + SQL
+    `random()`), satisfying "should slightly change on reload" with no extra
+    machinery."""
+    rng = rng or np.random.default_rng()
+    trending = popular_recommendations(db, k=trending_k, pool_size=max(pool_size, trending_k), temperature=temperature, rng=rng)
+    trending_categories = {item.category for item, _ in trending if item.category}
+    random_pool = db_utility.get_random_items_excluding_categories(db, trending_categories, limit=random_k)
+    discover = [(item, item.item_popularity or 0.0) for item in random_pool]
+    return trending, discover
+
+
+def onboarding_suggestions(
+    db, categories: list, k: int = 12, pool_size: int = 40,
+    temperature: float = 0.4, rng: np.random.Generator = None,
+):
+    """Signup step 2: candidate books from the categories the new user just
+    picked, popularity-ranked then temperature-sampled for variety."""
+    rng = rng or np.random.default_rng()
+    pool = db_utility.get_items_by_categories(db, categories, limit=pool_size)
+    scored = [(item, item.item_popularity or 0.0) for item in pool]
+    return _temperature_sample(scored, k, temperature, rng)
+
+
+def maybe_log_impression_no_click(
+    db, session_id: str, user_id: Optional[str], parent_asin: str, position: int,
+) -> Optional[str]:
+    """Checked inline every time an `impression` event is logged (see
+    `POST /events`). Scoped to top-row impressions only — see
+    `TOP_ROW_MAX_POSITION`'s docstring above. Materializes one
+    `impression_no_click` row the moment the threshold is crossed, not on
+    every subsequent impression after that."""
+    if position >= TOP_ROW_MAX_POSITION:
+        return None
+    if db_utility.has_event(db, session_id, parent_asin, "view"):
+        return None
+    count = db_utility.count_top_row_impressions(db, session_id, parent_asin, TOP_ROW_MAX_POSITION)
+    if count != IMPRESSION_NO_CLICK_THRESHOLD:
+        return None
+    if db_utility.has_event(db, session_id, parent_asin, "impression_no_click"):
+        return None
+    db_utility.log_event(
+        db, session_id=session_id, user_id=user_id, parent_asin=parent_asin,
+        event_type="impression_no_click", signal="negative",
+    )
+    return "impression_no_click"
+
+
+def maybe_log_repeated_wishlist_no_purchase(
+    db, session_id: str, user_id: str, row: "db_utility.Wishlist",
+) -> Optional[str]:
+    """Checked inline every time the wishlist page loads (after
+    `db_utility.bump_wishlist_views` increments `row.view_count`). See
+    `WISHLIST_NO_PURCHASE_MIN_AGE`'s docstring above for why this is tied to
+    the wishlist rather than the (naturally short-lived) cart."""
+    age = datetime.utcnow() - row.added_at
+    if age < WISHLIST_NO_PURCHASE_MIN_AGE or row.view_count < WISHLIST_NO_PURCHASE_MIN_VIEWS:
+        return None
+    if db_utility.has_checked_out(db, user_id, row.parent_asin):
+        return None
+    if db_utility.has_user_event(db, user_id, row.parent_asin, "repeated_wishlist_no_purchase"):
+        return None
+    db_utility.log_event(
+        db, session_id=session_id, user_id=user_id, parent_asin=row.parent_asin,
+        event_type="repeated_wishlist_no_purchase", signal="negative",
+    )
+    return "repeated_wishlist_no_purchase"

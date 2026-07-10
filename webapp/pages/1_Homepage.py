@@ -1,30 +1,71 @@
 import streamlit as st
 
-from services.api_client import get_because_you_liked, get_personalized, get_popular, get_similar_users_liked
-from services.ui import render_item_row, show_api_error
+from services.api_client import get_because_you_liked, get_discover, get_personalized, get_popular, get_similar_users_liked
+from services.ui import render_item_row, show_api_error, sync_pending_view
 
 st.title("Homepage")
 
+sync_pending_view()
+
 user_id = st.session_state.get("user_id")
+
+# Recommendations are fetched once and cached per user, recomputed only on
+# an explicit refresh. Without this, EVERY rerun of this page — including
+# the one triggered just by clicking a card's "View details" button —
+# re-ran all of these model-backed calls (two-tower retrieval + LightGBM
+# ranking, real inference against the full catalog) from scratch. Against
+# the real models that's slow enough that clicking a card could get
+# superseded by a later interaction before Streamlit ever finished
+# processing that click — which looked exactly like "clicking just
+# refreshes the homepage". The "temperature-sampled ... refresh to see them
+# vary" caption already implies this is meant to vary on explicit refresh,
+# not on every incidental rerun.
+cache_key = f"homepage_cache_{user_id or 'guest'}"
 
 col_refresh, _ = st.columns([1, 5])
 with col_refresh:
     if st.button("🔄 Refresh recommendations"):
+        st.session_state.pop(cache_key, None)
         st.rerun()
 st.caption("Recommendations are temperature-sampled from a wider candidate pool — refresh to see them vary.")
+
+if cache_key not in st.session_state:
+    cached = {}
+    if user_id is None:
+        result = get_discover(trending_k=20, random_k=10)
+        if "error" in result:
+            cached["discover_error"] = result
+            cached["popular_fallback"] = get_popular(k=10)
+        else:
+            cached["discover"] = result
+    else:
+        cached["personalized"] = get_personalized(user_id, k=10)
+        cached["because_you_liked"] = get_because_you_liked(user_id, k=5)
+        cached["similar_users_liked"] = get_similar_users_liked(user_id, k=5)
+    st.session_state[cache_key] = cached
+
+cached = st.session_state[cache_key]
 
 if user_id is None:
     st.subheader("Trending right now")
     st.caption("Log in from the sidebar to see personalized recommendations instead.")
-    result = get_popular(k=10)
-    if "error" in result:
-        show_api_error(result)
+    if "discover_error" in cached:
+        show_api_error(cached["discover_error"])
+        popular_fallback = cached.get("popular_fallback", {})
+        if "error" not in popular_fallback:
+            render_item_row(popular_fallback["items"], popular_fallback["source_model"])
     else:
-        render_item_row(result["items"], result["source_model"])
+        result = cached["discover"]
+        render_item_row(result["trending"], result["trending_source_model"])
+
+        st.divider()
+        st.subheader("Something different")
+        st.caption("From categories none of the books above belong to — a bit of catalog breadth beyond what's trending.")
+        render_item_row(result["discover"], result["discover_source_model"])
 
 else:
-    st.subheader(f"Recommended for you")
-    result = get_personalized(user_id, k=10)
+    st.subheader("Recommended for you")
+    result = cached["personalized"]
     if "error" in result:
         show_api_error(result)
     else:
@@ -32,7 +73,7 @@ else:
 
     st.divider()
     st.subheader("Because you liked...")
-    byl = get_because_you_liked(user_id, k=5)
+    byl = cached["because_you_liked"]
     if "error" in byl:
         show_api_error(byl)
     else:
@@ -43,7 +84,7 @@ else:
     st.divider()
     st.subheader("People like you also like")
     st.caption("Readers whose taste (by learned embedding) resembles yours — not items close to your own embedding, but what *they* actually liked.")
-    similar_users = get_similar_users_liked(user_id, k=5)
+    similar_users = cached["similar_users_liked"]
     if "error" in similar_users:
         show_api_error(similar_users)
     else:

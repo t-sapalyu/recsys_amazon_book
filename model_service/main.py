@@ -3,6 +3,7 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import List
 
 import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -14,13 +15,15 @@ import recommend
 from db_utility import Interaction
 from model_loader import load_artifacts
 from schemas import (
-    BecauseYouLikedResponse, HealthResponse, ItemOut, LatencyStats,
-    RecommendationResponse, RecommendedItem, SameAuthorResponse, SimilarAuthorsResponse,
+    BecauseYouLikedResponse, CartActionRequest, CartItemOut, CartResponse, CategoryListResponse,
+    CategoryPreferenceRequest, CheckoutRequest, CheckoutResponse, DiscoverResponse, EventLogItem,
+    EventLogResponse, EventRequest, EventResponse, HealthResponse, ItemOut, LatencyStats, RatingRequest,
+    RecommendationResponse, RecommendedItem, SameAuthorResponse, SignupRequest, SimilarAuthorsResponse,
+    WishlistActionRequest, WishlistItemOut, WishlistResponse,
 )
 
-SAMPLE_MODE = os.getenv("SAMPLE_MODE", "true").lower() == "true"
 APP_ROOT = Path(os.getenv("APP_ROOT", "/app"))
-CHECKPOINT_ROOT = APP_ROOT / ("checkpoints_sample" if SAMPLE_MODE else "checkpoints")
+CHECKPOINT_ROOT = APP_ROOT / "checkpoints"
 
 # Rolling window for the average-response-time reporting required in the README.
 _LATENCY_WINDOW = deque(maxlen=2000)
@@ -214,3 +217,227 @@ async def similar_users_liked(
     if not scored:
         raise HTTPException(status_code=404, detail=f"Not enough data to find similar users for '{user_id}'")
     return RecommendationResponse(source_model="People like you also like (user-user similarity)", items=_to_recs(scored))
+
+
+# --- Categories & guest discovery ---
+
+@app.get("/categories", response_model=CategoryListResponse)
+async def list_categories(db: Session = Depends(db_utility.get_db)):
+    return CategoryListResponse(categories=db_utility.list_categories(db))
+
+
+@app.get("/recommendations/discover", response_model=DiscoverResponse)
+async def discover(
+    trending_k: int = Query(20, ge=1, le=50), random_k: int = Query(10, ge=1, le=50),
+    temperature: float = Query(0.5, gt=0), db: Session = Depends(db_utility.get_db),
+):
+    """Guest homepage: trending books + a handful of random books from
+    categories outside that trending set, from a single snapshot so the two
+    sections are always consistent with each other (see `recommend.discover_for_guest`)."""
+    trending, discover_items = recommend.discover_for_guest(db, trending_k=trending_k, random_k=random_k, temperature=temperature)
+    return DiscoverResponse(
+        trending_source_model="Popular right now",
+        trending=_to_recs(trending),
+        discover_source_model="Something different (other categories)",
+        discover=_to_recs(discover_items),
+    )
+
+
+# --- Signup / onboarding ---
+
+@app.post("/users/signup", status_code=201)
+async def signup(payload: SignupRequest, db: Session = Depends(db_utility.get_db)):
+    user = db_utility.create_user(db, payload.user_id)
+    if user is None:
+        raise HTTPException(status_code=409, detail=f"User '{payload.user_id}' already exists")
+    return {"user_id": user.user_id}
+
+
+@app.post("/users/{user_id}/preferences/categories")
+async def set_category_preferences(user_id: str, payload: CategoryPreferenceRequest, db: Session = Depends(db_utility.get_db)):
+    if db.get(db_utility.User, user_id) is None:
+        raise HTTPException(status_code=404, detail=f"User '{user_id}' not found")
+    if len(payload.categories) < 2:
+        raise HTTPException(status_code=400, detail="Select at least 2 categories")
+    db_utility.set_category_preferences(db, user_id, payload.categories)
+    return {"status": "ok"}
+
+
+@app.get("/onboarding-suggestions", response_model=RecommendationResponse)
+async def onboarding_suggestions_by_categories(
+    categories: List[str] = Query(...), k: int = Query(12, ge=1, le=50), db: Session = Depends(db_utility.get_db),
+):
+    """Signup step 2, before the account exists yet — takes the categories
+    the user just picked directly, rather than reading persisted preferences
+    for a user_id. Account creation (and persisting those preferences) is
+    deferred to the Finish step, so an abandoned signup never leaves behind
+    a half-created user."""
+    scored = recommend.onboarding_suggestions(db, categories, k=k)
+    return RecommendationResponse(source_model="Onboarding suggestions (category popularity)", items=_to_recs(scored))
+
+
+@app.get("/users/{user_id}/onboarding-suggestions", response_model=RecommendationResponse)
+async def onboarding_suggestions(user_id: str, k: int = Query(12, ge=1, le=50), db: Session = Depends(db_utility.get_db)):
+    categories = db_utility.get_category_preferences(db, user_id)
+    if not categories:
+        raise HTTPException(status_code=404, detail=f"No category preferences set for user '{user_id}'")
+    scored = recommend.onboarding_suggestions(db, categories, k=k)
+    return RecommendationResponse(source_model="Onboarding suggestions (category popularity)", items=_to_recs(scored))
+
+
+# --- Implicit events ---
+
+@app.post("/events", response_model=EventResponse)
+async def record_event(payload: EventRequest, db: Session = Depends(db_utility.get_db)):
+    """Generic logger for every impression/view/positive/negative signal —
+    see `db_utility.EVENT_SIGNALS` for the full catalog. Never trusts the
+    client for `signal`; looks it up server-side from `event_type`."""
+    if payload.event_type not in db_utility.EVENT_SIGNALS:
+        raise HTTPException(status_code=400, detail=f"Unknown event_type '{payload.event_type}'")
+    signal = db_utility.EVENT_SIGNALS[payload.event_type]
+    db_utility.log_event(
+        db, session_id=payload.session_id, user_id=payload.user_id, parent_asin=payload.parent_asin,
+        event_type=payload.event_type, signal=signal, position=payload.position, value=payload.value,
+    )
+
+    derived = None
+    if payload.event_type == "impression" and payload.parent_asin and payload.position is not None:
+        derived = recommend.maybe_log_impression_no_click(
+            db, session_id=payload.session_id, user_id=payload.user_id,
+            parent_asin=payload.parent_asin, position=payload.position,
+        )
+    elif payload.event_type in ("checkout", "onboarding_like") and payload.user_id and payload.parent_asin:
+        db_utility.backfill_interaction(db, payload.user_id, payload.parent_asin)
+
+    return EventResponse(status="ok", derived_negative_event=derived)
+
+
+# --- Wishlist ---
+
+@app.get("/users/{user_id}/wishlist", response_model=WishlistResponse)
+async def get_wishlist(user_id: str, session_id: str = Query(...), db: Session = Depends(db_utility.get_db)):
+    rows = db_utility.bump_wishlist_views(db, user_id)
+    for row in rows:
+        recommend.maybe_log_repeated_wishlist_no_purchase(db, session_id=session_id, user_id=user_id, row=row)
+    items_by_id = db_utility.get_items(db, [r.parent_asin for r in rows])
+    return WishlistResponse(items=[
+        WishlistItemOut(item=_to_item_out(items_by_id[r.parent_asin]), added_at=r.added_at, view_count=r.view_count)
+        for r in rows if r.parent_asin in items_by_id
+    ])
+
+
+@app.post("/users/{user_id}/wishlist", status_code=201)
+async def add_wishlist_item(user_id: str, payload: WishlistActionRequest, db: Session = Depends(db_utility.get_db)):
+    if db.get(db_utility.User, user_id) is None:
+        raise HTTPException(status_code=404, detail=f"User '{user_id}' not found")
+    if db_utility.get_item(db, payload.parent_asin) is None:
+        raise HTTPException(status_code=404, detail=f"Item '{payload.parent_asin}' not found")
+    db_utility.add_to_wishlist(db, user_id, payload.parent_asin)
+    db_utility.log_event(
+        db, session_id=payload.session_id, user_id=user_id, parent_asin=payload.parent_asin,
+        event_type="wishlist_add", signal="positive",
+    )
+    return {"status": "ok"}
+
+
+@app.delete("/users/{user_id}/wishlist/{item_id}")
+async def remove_wishlist_item(user_id: str, item_id: str, session_id: str = Query(...), db: Session = Depends(db_utility.get_db)):
+    removed = db_utility.remove_from_wishlist(db, user_id, item_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Item not in wishlist")
+    db_utility.log_event(
+        db, session_id=session_id, user_id=user_id, parent_asin=item_id,
+        event_type="wishlist_remove", signal="negative",
+    )
+    return {"status": "ok"}
+
+
+# --- Cart & checkout ---
+
+@app.get("/users/{user_id}/cart", response_model=CartResponse)
+async def get_cart(user_id: str, db: Session = Depends(db_utility.get_db)):
+    rows = db_utility.get_cart(db, user_id)
+    items_by_id = db_utility.get_items(db, [r.parent_asin for r in rows])
+    out_items = [
+        CartItemOut(item=_to_item_out(items_by_id[r.parent_asin]), added_at=r.added_at)
+        for r in rows if r.parent_asin in items_by_id
+    ]
+    total_price = sum((items_by_id[r.parent_asin].price or 0.0) for r in rows if r.parent_asin in items_by_id)
+    return CartResponse(items=out_items, total_price=total_price)
+
+
+@app.post("/users/{user_id}/cart", status_code=201)
+async def add_cart_item(user_id: str, payload: CartActionRequest, db: Session = Depends(db_utility.get_db)):
+    if db.get(db_utility.User, user_id) is None:
+        raise HTTPException(status_code=404, detail=f"User '{user_id}' not found")
+    if db_utility.get_item(db, payload.parent_asin) is None:
+        raise HTTPException(status_code=404, detail=f"Item '{payload.parent_asin}' not found")
+    db_utility.add_to_cart(db, user_id, payload.parent_asin)
+    db_utility.log_event(
+        db, session_id=payload.session_id, user_id=user_id, parent_asin=payload.parent_asin,
+        event_type="cart_add", signal="positive",
+    )
+    return {"status": "ok"}
+
+
+@app.delete("/users/{user_id}/cart/{item_id}")
+async def remove_cart_item(user_id: str, item_id: str, session_id: str = Query(...), db: Session = Depends(db_utility.get_db)):
+    removed = db_utility.remove_from_cart(db, user_id, item_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Item not in cart")
+    db_utility.log_event(
+        db, session_id=session_id, user_id=user_id, parent_asin=item_id,
+        event_type="cart_remove", signal="negative",
+    )
+    return {"status": "ok"}
+
+
+@app.post("/users/{user_id}/checkout", response_model=CheckoutResponse)
+async def checkout(user_id: str, payload: CheckoutRequest, db: Session = Depends(db_utility.get_db)):
+    """Simulated checkout, no real payment — logs a `checkout` event and
+    backfills a live `Interaction` per cart item, then empties the cart."""
+    rows = db_utility.get_cart(db, user_id)
+    if not rows:
+        raise HTTPException(status_code=400, detail="Cart is empty")
+    items_by_id = db_utility.get_items(db, [r.parent_asin for r in rows])
+    # Built before `clear_cart` — its bulk delete() expires these ORM
+    # instances, so `row.parent_asin` isn't safe to read afterward.
+    checked_out_items = [_to_item_out(items_by_id[r.parent_asin]) for r in rows if r.parent_asin in items_by_id]
+    for row in rows:
+        db_utility.backfill_interaction(db, user_id, row.parent_asin)
+        db_utility.log_event(
+            db, session_id=payload.session_id, user_id=user_id, parent_asin=row.parent_asin,
+            event_type="checkout", signal="positive",
+        )
+    db_utility.clear_cart(db, user_id)
+    return CheckoutResponse(status="ok", checked_out_items=checked_out_items)
+
+
+# --- Activity log (viewing recorded positive/negative signals) ---
+
+@app.get("/users/{user_id}/events", response_model=EventLogResponse)
+async def get_user_events(user_id: str, limit: int = Query(200, ge=1, le=1000), db: Session = Depends(db_utility.get_db)):
+    rows = db_utility.get_user_events(db, user_id, limit=limit)
+    items_by_id = db_utility.get_items(db, [r.parent_asin for r in rows if r.parent_asin])
+    return EventLogResponse(events=[
+        EventLogItem(
+            event_type=r.event_type, signal=r.signal, reason=db_utility.EVENT_DESCRIPTIONS.get(r.event_type),
+            parent_asin=r.parent_asin,
+            item_title=(items_by_id[r.parent_asin].title if r.parent_asin in items_by_id else None),
+            position=r.position, value=r.value, created_at=r.created_at,
+        )
+        for r in rows
+    ])
+
+
+# --- Explicit ratings (double as a positive/negative implicit signal) ---
+
+@app.post("/users/{user_id}/ratings")
+async def submit_rating(user_id: str, payload: RatingRequest, db: Session = Depends(db_utility.get_db)):
+    event_type = "high_rating" if payload.rating >= 4 else "low_rating"
+    signal = db_utility.EVENT_SIGNALS[event_type]
+    db_utility.log_event(
+        db, session_id=payload.session_id, user_id=user_id, parent_asin=payload.parent_asin,
+        event_type=event_type, signal=signal, value=payload.rating,
+    )
+    return {"status": "ok"}
