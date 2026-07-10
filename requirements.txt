@@ -1,0 +1,7 @@
+# Core (data prep, EDA) - notebook 01
+pandas
+numpy
+pyarrow
+requests
+tqdm
+matplotlib

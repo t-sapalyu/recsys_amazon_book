@@ -216,3 +216,24 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+data/raw/
+data/raw_sample/
+data/interim/
+data/processed/
+data/processed_sample/
+checkpoints/
+checkpoints_sample/
+results/metrics_sample.csv
+*.parquet
+*.jsonl.gz
+*.jsonl
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.env
+.venv/
+notebooks/
+.claude/
+scripts/
