@@ -43,8 +43,9 @@ item_page = st.Page("pages/2_Item.py", title="Item Detail")
 signup_page = st.Page("pages/0_Signup.py", title="Sign Up")
 account_page = st.Page("pages/3_My_Account.py", title="My Account")
 activity_log_page = st.Page("pages/4_Activity_Log.py", title="Activity Log")
+signal_rules_page = st.Page("pages/5_Signal_Rules.py", title="Signal Rules")
 
-pg = st.navigation([main_page, homepage, item_page, signup_page, account_page, activity_log_page])
+pg = st.navigation([main_page, homepage, item_page, signup_page, account_page, activity_log_page, signal_rules_page])
 
 
 # --- Sidebar: mock login + live health check ---
@@ -74,6 +75,7 @@ with st.sidebar:
     else:
         st.page_link(account_page, label="My wishlist & cart", icon="🛍️")
     st.page_link(activity_log_page, label="Activity log (recorded signals)", icon="📋")
+    st.page_link(signal_rules_page, label="Signal rules (the full rulebook)", icon="📜")
 
     @st.fragment(run_every="20s")
     def live_health_check():

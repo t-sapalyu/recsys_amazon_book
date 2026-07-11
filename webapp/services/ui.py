@@ -76,6 +76,34 @@ def log_event(event_type: str, parent_asin: str = None, position: int = None, va
     )
 
 
+def ensure_wishlist_cart_cache(user_id: str = None):
+    """Fetch the logged-in user's current wishlist/cart item sets once and
+    cache them in `session_state`, so `render_item_card` can show a filled
+    vs. empty heart/cart icon without an API call per card. Refetched
+    whenever the logged-in user changes (switching accounts, logging out);
+    every add/remove path also mutates these sets directly (see
+    `render_item_card`, `pages/2_Item.py`, `pages/3_My_Account.py`) so they
+    never need a re-fetch just to reflect an action taken this session."""
+    owner_key = "wishlist_cart_cache_owner"
+    if user_id is None:
+        st.session_state["wishlist_asins"] = set()
+        st.session_state["cart_asins"] = set()
+        st.session_state[owner_key] = None
+        return
+    if st.session_state.get(owner_key) == user_id:
+        return
+    ensure_session()
+    wishlist_result = api_client.get_wishlist(user_id, st.session_state["session_id"])
+    cart_result = api_client.get_cart(user_id)
+    st.session_state["wishlist_asins"] = (
+        {row["item"]["parent_asin"] for row in wishlist_result["items"]} if "error" not in wishlist_result else set()
+    )
+    st.session_state["cart_asins"] = (
+        {row["item"]["parent_asin"] for row in cart_result["items"]} if "error" not in cart_result else set()
+    )
+    st.session_state[owner_key] = user_id
+
+
 def clear_pending_view():
     """Call right after a positive action (wishlist/cart/rating/like) on the
     item page, so that action isn't overwritten by a bounce/no-action
@@ -129,13 +157,34 @@ def render_item_card(column, rec, source_model: str = None, position: int = None
             st.caption(f"⭐ {item['average_rating']:.1f}" + (f" · ${item['price']:.2f}" if item.get("price") else ""))
 
         if user_id:
+            wishlist_asins = st.session_state.get("wishlist_asins", set())
+            cart_asins = st.session_state.get("cart_asins", set())
+            in_wishlist = item["parent_asin"] in wishlist_asins
+            in_cart = item["parent_asin"] in cart_asins
+
             b1, b2, b3, b4 = st.columns(4)
-            if b1.button("🤍", key=f"wishlist_{key_suffix}", help="Add to wishlist"):
-                api_client.add_to_wishlist(user_id, item["parent_asin"], st.session_state["session_id"])
-                st.toast("Added to wishlist")
-            if b2.button("🛒", key=f"cart_{key_suffix}", help="Add to cart"):
-                api_client.add_to_cart(user_id, item["parent_asin"], st.session_state["session_id"])
-                st.toast("Added to cart")
+            wishlist_icon = "❤️" if in_wishlist else "🤍"
+            if b1.button(wishlist_icon, key=f"wishlist_{key_suffix}", help="Remove from wishlist" if in_wishlist else "Add to wishlist"):
+                if in_wishlist:
+                    api_client.remove_from_wishlist(user_id, item["parent_asin"], st.session_state["session_id"])
+                    wishlist_asins.discard(item["parent_asin"])
+                    st.toast("Removed from wishlist")
+                else:
+                    api_client.add_to_wishlist(user_id, item["parent_asin"], st.session_state["session_id"])
+                    wishlist_asins.add(item["parent_asin"])
+                    st.toast("Added to wishlist")
+                st.rerun()
+            cart_icon = "✅" if in_cart else "🛒"
+            if b2.button(cart_icon, key=f"cart_{key_suffix}", help="Remove from cart" if in_cart else "Add to cart"):
+                if in_cart:
+                    api_client.remove_from_cart(user_id, item["parent_asin"], st.session_state["session_id"])
+                    cart_asins.discard(item["parent_asin"])
+                    st.toast("Removed from cart")
+                else:
+                    api_client.add_to_cart(user_id, item["parent_asin"], st.session_state["session_id"])
+                    cart_asins.add(item["parent_asin"])
+                    st.toast("Added to cart")
+                st.rerun()
             if b3.button("👎", key=f"notint_{key_suffix}", help="Not interested"):
                 log_event("not_interested", parent_asin=item["parent_asin"], position=position)
                 st.toast("Thanks — we'll show you less of this")
@@ -150,6 +199,7 @@ def render_item_row(items, source_model: str, n_cols: int = 5):
     them shown once above the row (project.md: "show which model produced
     each recommendation"). Skips items the user dismissed earlier this session."""
     ensure_session()
+    ensure_wishlist_cart_cache(st.session_state.get("user_id"))
     hidden = st.session_state["hidden_asins"]
     visible_items = [rec for rec in items if rec["item"]["parent_asin"] not in hidden]
     st.caption(f"Powered by: **{source_model}**")

@@ -190,6 +190,35 @@ EVENT_DESCRIPTIONS = {
 }
 
 
+# "explicit" = the interaction's entire purpose is stating a preference (a
+# rating widget, a thumbs up/down, an onboarding like/skip pick) — the user
+# did nothing else with that click. "implicit" = preference is inferred as
+# a side effect of an action whose primary purpose is something else
+# (browsing, shopping, list management) — the classic implicit-vs-explicit
+# feedback distinction in recommender systems (e.g. Hu, Koren & Volinsky,
+# "Collaborative Filtering for Implicit Feedback Datasets").
+EVENT_KIND = {
+    "impression": "implicit",
+    "view": "implicit",
+    "wishlist_add": "implicit",
+    "cart_add": "implicit",
+    "checkout": "implicit",
+    "like": "explicit",
+    "onboarding_like": "explicit",
+    "high_rating": "explicit",
+    "impression_no_click": "implicit",
+    "viewed_no_action": "implicit",
+    "quick_bounce": "implicit",
+    "not_interested": "explicit",
+    "dismiss_recommendation": "implicit",
+    "wishlist_remove": "implicit",
+    "cart_remove": "implicit",
+    "repeated_wishlist_no_purchase": "implicit",
+    "low_rating": "explicit",
+    "onboarding_skip": "explicit",
+}
+
+
 # --- Database operations ---
 
 
@@ -308,6 +337,30 @@ def get_random_items_excluding_categories(db: Session, exclude_categories: set, 
     if exclude_categories:
         query = query.filter(Item.category.notin_(exclude_categories))
     return query.order_by(func.random()).limit(limit).all()
+
+
+def get_recently_added_items(db: Session, pool_size: int = 100, limit: int = 10):
+    """"Recently added" proxy — this catalog is a static historical
+    snapshot with no real "date added to store" column, so `item_age_days`
+    (days between an item's first observed interaction and the dataset's
+    cutoff — smaller means it entered the interaction data more recently)
+    stands in for recency. Pool of the `pool_size` most recent by that
+    measure, then a true-random pick of `limit` from that pool — changes on
+    every call, same as `get_random_items_excluding_categories`."""
+    recent_pool = (
+        db.query(Item.parent_asin)
+        .filter(Item.item_age_days.isnot(None))
+        .order_by(Item.item_age_days.asc())
+        .limit(pool_size)
+        .subquery()
+    )
+    return (
+        db.query(Item)
+        .filter(Item.parent_asin.in_(db.query(recent_pool.c.parent_asin)))
+        .order_by(func.random())
+        .limit(limit)
+        .all()
+    )
 
 
 # --- Signup ---
