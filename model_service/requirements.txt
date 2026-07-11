@@ -1,0 +1,9 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqlalchemy==2.0.47
+psycopg2-binary==2.9.11
+pandas==2.2.3
+numpy==1.26.4
+pyarrow==17.0.0
+faiss-cpu>=1.8.0
+lightgbm>=4.5.0

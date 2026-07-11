@@ -1,0 +1,15 @@
+# Git
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Conda environments
+conda-meta/
+
+# IDE files
+.vscode/

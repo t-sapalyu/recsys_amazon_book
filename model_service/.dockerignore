@@ -1,0 +1,22 @@
+# Git
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Conda environments
+conda-meta/
+
+# IDE files
+.vscode/
+
+# Leftovers from a different project this service was adapted from — not
+# used by the current recommender API, no need to ship them in the image.
+baseline_model.pkl
+main.py_backup
+db_utility.py_backup
+predict.py
