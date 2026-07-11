@@ -159,3 +159,16 @@ class EventLogItem(BaseModel):
 
 class EventLogResponse(BaseModel):
     events: List[EventLogItem]
+
+
+# --- Signal rules catalog (static reference, not per-user events) ---
+
+class SignalRule(BaseModel):
+    event_type: str
+    signal: str
+    kind: str
+    reason: str
+
+
+class SignalRulesResponse(BaseModel):
+    rules: List[SignalRule]

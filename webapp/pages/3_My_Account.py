@@ -1,7 +1,7 @@
 import streamlit as st
 
 from services import api_client
-from services.ui import PLACEHOLDER_IMAGE, ensure_session, show_api_error, sync_pending_view
+from services.ui import PLACEHOLDER_IMAGE, ensure_session, ensure_wishlist_cart_cache, show_api_error, sync_pending_view
 
 st.title("My Account")
 
@@ -12,6 +12,11 @@ user_id = st.session_state.get("user_id")
 if not user_id:
     st.info("Log in or sign up from the sidebar to see your wishlist and cart.")
     st.stop()
+
+# So the heart/cart icons shown elsewhere (homepage cards, item pages) stay
+# accurate immediately after removing/checking out here, without needing a
+# separate re-fetch.
+ensure_wishlist_cart_cache(user_id)
 
 tab_wishlist, tab_cart = st.tabs(["🤍 Wishlist", "🛒 Cart"])
 
@@ -35,6 +40,7 @@ with tab_wishlist:
             with col_action:
                 if st.button("Remove", key=f"wishlist_remove_{item['parent_asin']}"):
                     api_client.remove_from_wishlist(user_id, item["parent_asin"], st.session_state["session_id"])
+                    st.session_state.get("wishlist_asins", set()).discard(item["parent_asin"])
                     st.rerun()
             st.divider()
 
@@ -57,6 +63,7 @@ with tab_cart:
             with col_action:
                 if st.button("Remove", key=f"cart_remove_{item['parent_asin']}"):
                     api_client.remove_from_cart(user_id, item["parent_asin"], st.session_state["session_id"])
+                    st.session_state.get("cart_asins", set()).discard(item["parent_asin"])
                     st.rerun()
             st.divider()
 
@@ -66,5 +73,6 @@ with tab_cart:
             if "error" in checkout_result:
                 show_api_error(checkout_result)
             else:
+                st.session_state["cart_asins"] = set()
                 st.success("Order placed — thank you! (Demo only — no real payment was made.)")
                 st.rerun()

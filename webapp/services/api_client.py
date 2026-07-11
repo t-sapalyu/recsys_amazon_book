@@ -120,6 +120,10 @@ def get_discover(trending_k: int = 20, random_k: int = 10, temperature: float = 
     return _get("/recommendations/discover", params={"trending_k": trending_k, "random_k": random_k, "temperature": temperature})
 
 
+def get_recent(k: int = 10, pool_size: int = 100):
+    return _get("/recommendations/recent", params={"k": k, "pool_size": pool_size})
+
+
 # --- Signup / onboarding ---
 
 def signup(user_id: str):
@@ -201,3 +205,7 @@ def submit_rating(user_id: str, parent_asin: str, rating: float, session_id: str
 
 def get_user_events(user_id: str, limit: int = 200):
     return _get(f"/users/{user_id}/events", params={"limit": limit})
+
+
+def get_signal_catalog():
+    return _get("/events/catalog")

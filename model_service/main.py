@@ -18,8 +18,8 @@ from schemas import (
     BecauseYouLikedResponse, CartActionRequest, CartItemOut, CartResponse, CategoryListResponse,
     CategoryPreferenceRequest, CheckoutRequest, CheckoutResponse, DiscoverResponse, EventLogItem,
     EventLogResponse, EventRequest, EventResponse, HealthResponse, ItemOut, LatencyStats, RatingRequest,
-    RecommendationResponse, RecommendedItem, SameAuthorResponse, SignupRequest, SimilarAuthorsResponse,
-    WishlistActionRequest, WishlistItemOut, WishlistResponse,
+    RecommendationResponse, RecommendedItem, SameAuthorResponse, SignalRule, SignalRulesResponse,
+    SignupRequest, SimilarAuthorsResponse, WishlistActionRequest, WishlistItemOut, WishlistResponse,
 )
 
 APP_ROOT = Path(os.getenv("APP_ROOT", "/app"))
@@ -210,10 +210,12 @@ async def similar_users_liked(
     db: Session = Depends(db_utility.get_db),
 ):
     """"People like you also like" — see recommend.similar_users_liked for the
-    user-user similarity logic; uses the embeddings precomputed at startup."""
+    user-user similarity logic; uses the embeddings precomputed at startup,
+    falling back to a live-computed embedding for the requesting user if
+    they aren't in that precomputed set (e.g. signed up after startup)."""
     if db.get(db_utility.User, user_id) is None:
         raise HTTPException(status_code=404, detail=f"User '{user_id}' not found")
-    scored = recommend.similar_users_liked(db, app.state.user_embeddings, user_id, k=k, temperature=temperature)
+    scored = recommend.similar_users_liked(db, app.state.artifacts, app.state.user_embeddings, user_id, k=k, temperature=temperature)
     if not scored:
         raise HTTPException(status_code=404, detail=f"Not enough data to find similar users for '{user_id}'")
     return RecommendationResponse(source_model="People like you also like (user-user similarity)", items=_to_recs(scored))
@@ -241,6 +243,16 @@ async def discover(
         discover_source_model="Something different (other categories)",
         discover=_to_recs(discover_items),
     )
+
+
+@app.get("/recommendations/recent", response_model=RecommendationResponse)
+async def recent_items(
+    k: int = Query(10, ge=1, le=50), pool_size: int = Query(100, ge=1, le=500), db: Session = Depends(db_utility.get_db),
+):
+    """Homepage "Recently added" section (see `recommend.recently_added`) —
+    shown for both guest and logged-in views."""
+    scored = recommend.recently_added(db, pool_size=pool_size, k=k)
+    return RecommendationResponse(source_model="Recently added (random)", items=_to_recs(scored))
 
 
 # --- Signup / onboarding ---
@@ -414,6 +426,21 @@ async def checkout(user_id: str, payload: CheckoutRequest, db: Session = Depends
 
 
 # --- Activity log (viewing recorded positive/negative signals) ---
+
+@app.get("/events/catalog", response_model=SignalRulesResponse)
+async def get_signal_catalog():
+    """The static rulebook — every event_type this app can record, which
+    bucket it falls in (positive/negative/neutral), whether it's implicit or
+    explicit feedback, and what condition triggers it. Not per-user data;
+    see /users/{user_id}/events for that."""
+    return SignalRulesResponse(rules=[
+        SignalRule(
+            event_type=event_type, signal=signal, kind=db_utility.EVENT_KIND[event_type],
+            reason=db_utility.EVENT_DESCRIPTIONS[event_type],
+        )
+        for event_type, signal in db_utility.EVENT_SIGNALS.items()
+    ])
+
 
 @app.get("/users/{user_id}/events", response_model=EventLogResponse)
 async def get_user_events(user_id: str, limit: int = Query(200, ge=1, le=1000), db: Session = Depends(db_utility.get_db)):

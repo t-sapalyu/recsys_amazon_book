@@ -1,6 +1,6 @@
 import streamlit as st
 
-from services.api_client import get_because_you_liked, get_discover, get_personalized, get_popular, get_similar_users_liked
+from services.api_client import get_because_you_liked, get_discover, get_personalized, get_popular, get_recent, get_similar_users_liked
 from services.ui import render_item_row, show_api_error, sync_pending_view
 
 st.title("Homepage")
@@ -42,6 +42,7 @@ if cache_key not in st.session_state:
         cached["personalized"] = get_personalized(user_id, k=10)
         cached["because_you_liked"] = get_because_you_liked(user_id, k=5)
         cached["similar_users_liked"] = get_similar_users_liked(user_id, k=5)
+    cached["recent"] = get_recent(k=10)
     st.session_state[cache_key] = cached
 
 cached = st.session_state[cache_key]
@@ -86,6 +87,18 @@ else:
     st.caption("Readers whose taste (by learned embedding) resembles yours — not items close to your own embedding, but what *they* actually liked.")
     similar_users = cached["similar_users_liked"]
     if "error" in similar_users:
-        show_api_error(similar_users)
+        # A brand-new user (or one with very little history yet) genuinely
+        # has no similar-taste readers to compare against — an expected,
+        # temporary state, not a system error, so no red error box here.
+        st.caption("Not enough activity yet to find readers with similar taste — check back after browsing or liking a few more books.")
     else:
         render_item_row(similar_users["items"], similar_users["source_model"])
+
+st.divider()
+st.subheader("Recently added")
+st.caption("A random pick from the 100 most recently added books — changes on every reload.")
+recent = cached["recent"]
+if "error" in recent:
+    show_api_error(recent)
+else:
+    render_item_row(recent["items"], recent["source_model"])
