@@ -137,7 +137,7 @@ def compute_all_user_embeddings(db, artifacts: Artifacts) -> dict:
 
 
 def similar_users_liked(
-    db, user_embeddings: dict, user_id: str, k: int = 10, n_similar_users: int = 20,
+    db, artifacts: Artifacts, user_embeddings: dict, user_id: str, k: int = 10, n_similar_users: int = 20,
     pool_size: int = 30, temperature: float = 0.5, rng: np.random.Generator = None,
 ):
     """"People like you also like" — find the users whose embeddings are
@@ -147,11 +147,22 @@ def similar_users_liked(
     your own embedding," this is "what people whose taste resembles yours
     actually liked" — the classic collaborative-filtering framing, just built
     on the same learned embeddings instead of a separate co-occurrence model.
+
+    `user_embeddings` is the dict precomputed once at API startup
+    (`compute_all_user_embeddings`) — it only covers users who existed *and*
+    had interaction history at that time. A user created since (e.g. a fresh
+    signup) won't be in it, so their own embedding is computed live here
+    instead of just bailing out — the same fallback `personalized_recommendations`
+    already relies on. Only the *other* side of the comparison stays
+    precomputed, since recomputing every other user's embedding per request
+    would be wasteful at this catalog/user-pool size.
     """
     rng = rng or np.random.default_rng()
-    if user_id not in user_embeddings:
+    my_emb = user_embeddings.get(user_id)
+    if my_emb is None:
+        my_emb = compute_user_embedding_for_serving(db, artifacts, user_id)
+    if my_emb is None:
         return []
-    my_emb = user_embeddings[user_id]
     other_ids = [u for u in user_embeddings if u != user_id]
     if not other_ids:
         return []
@@ -356,6 +367,16 @@ def discover_for_guest(
     random_pool = db_utility.get_random_items_excluding_categories(db, trending_categories, limit=random_k)
     discover = [(item, item.item_popularity or 0.0) for item in random_pool]
     return trending, discover
+
+
+def recently_added(db, pool_size: int = 100, k: int = 10):
+    """Homepage "Recently added" section — see
+    `db_utility.get_recently_added_items` for what "recently added" means
+    for a static historical catalog with no real add-date. Already random
+    at the SQL level (`func.random()`), so this varies on every reload with
+    no extra sampling needed."""
+    items = db_utility.get_recently_added_items(db, pool_size=pool_size, limit=k)
+    return [(item, item.item_popularity or 0.0) for item in items]
 
 
 def onboarding_suggestions(
